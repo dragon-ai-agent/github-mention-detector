@@ -1,0 +1,115 @@
+name: 'GitHub AI Mention Detector'
+description: 'Detects and validates AI agent mentions in GitHub issues, PRs, and comments'
+inputs:
+  github-token:
+    description: 'GitHub token for API access. E.g secrets.PAT_FOR_PR'
+    required: true
+  mention-pattern:
+    description: 'Regex pattern to match mentions (e.g., "@dragon-ai-agent\\s+please\\s+(.*)")'
+    required: true
+    default: '@dragon-ai-agent+\\s+please\\s+(.*)'
+  controllers-file:
+    description: 'Path to JSON file containing authorized users'
+    required: false
+    default: '.github/ai-controllers.json'
+  fallback-controllers:
+    description: 'Comma-separated list of fallback authorized users'
+    required: false
+    default: ''
+
+outputs:
+  qualified-mention:
+    description: 'Whether this is a qualified mention from an authorized user'
+    value: ${{ steps.check.outputs.qualified-mention }}
+  prompt:
+    description: 'The extracted prompt/request text'
+    value: ${{ steps.check.outputs.prompt }}
+  user:
+    description: 'GitHub username who made the request'
+    value: ${{ steps.check.outputs.user }}
+  item-type:
+    description: 'Type of GitHub item (issue or pull_request)'
+    value: ${{ steps.check.outputs.item-type }}
+  item-number:
+    description: 'GitHub issue or PR number'
+    value: ${{ steps.check.outputs.item-number }}
+  controllers:
+    description: 'Formatted list of authorized controllers'
+    value: ${{ steps.check.outputs.controllers }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check for qualifying mention
+      id: check
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          // Load allowed users from config
+          const fs = require('fs');
+          let allowedUsers = [];
+          try {
+            const configContent = fs.readFileSync('${{ inputs.controllers-file }}', 'utf8');
+            allowedUsers = JSON.parse(configContent);
+          } catch (error) {
+            console.log('Error loading allowed users:', error);
+            // Use fallback controllers if provided
+            const fallback = '${{ inputs.fallback-controllers }}';
+            allowedUsers = fallback ? fallback.split(',').map(u => u.trim()) : [];
+          }
+          
+          // Get content and user from event payload
+          let content = '';
+          let userLogin = '';
+          let itemType = '';
+          let itemNumber = 0;
+          
+          if (context.eventName === 'issues') {
+            content = context.payload.issue.body || '';
+            userLogin = context.payload.issue.user.login;
+            itemType = 'issue';
+            itemNumber = context.payload.issue.number;
+          } else if (context.eventName === 'pull_request') {
+            content = context.payload.pull_request.body || '';
+            userLogin = context.payload.pull_request.user.login;
+            itemType = 'pull_request';
+            itemNumber = context.payload.pull_request.number;
+          } else if (context.eventName === 'issue_comment') {
+            content = context.payload.comment.body || '';
+            userLogin = context.payload.comment.user.login;
+            itemType = 'issue';
+            itemNumber = context.payload.issue.number;
+          } else if (context.eventName === 'pull_request_review_comment') {
+            content = context.payload.comment.body || '';
+            userLogin = context.payload.comment.user.login;
+            itemType = 'pull_request';
+            itemNumber = context.payload.pull_request.number;
+          }
+          
+          // Check if user is allowed and mention exists
+          const isAllowed = allowedUsers.includes(userLogin);
+          const mentionRegex = new RegExp('${{ inputs.mention-pattern }}', 'i');
+          const mentionMatch = content.match(mentionRegex);
+          
+          const qualifiedMention = isAllowed && mentionMatch !== null;
+          const prompt = qualifiedMention ? mentionMatch[1].trim() : '';
+          
+          console.log(`User: ${userLogin}, Allowed: ${isAllowed}, Has mention: ${mentionMatch !== null}`);
+          
+          // Set outputs
+          core.setOutput('qualified-mention', qualifiedMention);
+          core.setOutput('prompt', prompt);
+          core.setOutput('user', userLogin);
+          core.setOutput('item-type', itemType);
+          core.setOutput('item-number', itemNumber);
+          core.setOutput('controllers', allowedUsers.map(u => '@' + u).join(', '));
+          
+          return {
+            qualifiedMention,
+            itemType,
+            itemNumber,
+            prompt,
+            user: userLogin,
+            controllers: allowedUsers.map(u => '@' + u).join(', ')
+          };
